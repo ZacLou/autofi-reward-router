@@ -2,14 +2,18 @@ import { Asset, Keypair } from '@stellar/stellar-sdk';
 import { startDripListener } from './services/dripListener';
 import { executePathPayment } from './services/pathPayment';
 import { ANCHORS } from './config/anchors';
-import type { RewardEvent } from './types';
+import type { RewardEvent, RoutePreferences } from './types';
 
 // TODO: Replace with Soroban contract read via soroban-client
-const MOCK_PREFS = {
+const MOCK_PREFS: Pick<RoutePreferences, 'off_ramp_pct' | 'keep_crypto_pct' | 'anchor_asset_code'> = {
   off_ramp_pct: 70,
   keep_crypto_pct: 30,
   anchor_asset_code: 'NGNX',
 };
+
+if (MOCK_PREFS.off_ramp_pct + MOCK_PREFS.keep_crypto_pct !== 100) {
+  throw new Error(`MOCK_PREFS allocations must sum to 100, got ${MOCK_PREFS.off_ramp_pct + MOCK_PREFS.keep_crypto_pct}`);
+}
 
 async function handleReward(event: RewardEvent): Promise<void> {
   console.log(`[AutoFi] Reward received: ${event.amount} ${event.assetCode} from ${event.sourceId}`);
