@@ -1,0 +1,20 @@
+{
+  "name": "autofi-wallet",
+  "version": "0.1.0",
+  "description": "Automated developer reward off-ramp via Stellar anchors and Soroban smart contracts",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts",
+    "contract:build": "cd contracts/reward_router && soroban contract build"
+  },
+  "dependencies": {
+    "@stellar/stellar-sdk": "12.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "20.14.0",
+    "ts-node": "10.9.2",
+    "typescript": "5.4.5"
+  }
+}
