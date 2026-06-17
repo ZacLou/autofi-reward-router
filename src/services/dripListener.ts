@@ -1,3 +1,4 @@
+import { logger } from '../utils/logger';
 import type { RewardEvent } from '../types';
 
 type RewardHandler = (event: RewardEvent) => Promise<void>;
@@ -14,19 +15,23 @@ export async function startDripListener(
   onReward: RewardHandler,
   intervalMs = 30_000
 ): Promise<void> {
-  console.log(`[DripListener] Watching for payouts to ${recipientAddress}`);
+  logger.info(`[DripListener] Watching for payouts to ${recipientAddress}`);
 
   // Placeholder polling loop — replace body with subgraph/webhook integration
   setInterval(async () => {
-    // Simulate receiving a Drips Wave payout
-    const mockEvent: RewardEvent = {
-      developerPublicKey: recipientAddress,
-      amount: '100.00',
-      assetCode: 'USDC',
-      assetIssuer: 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN',
-      sourceId: 'drips',
-    };
+    try {
+      // Simulate receiving a Drips Wave payout
+      const mockEvent: RewardEvent = {
+        developerPublicKey: recipientAddress,
+        amount: '100.00',
+        assetCode: 'USDC',
+        assetIssuer: 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN',
+        sourceId: 'drips',
+      };
 
-    await onReward(mockEvent);
+      await onReward(mockEvent);
+    } catch (err) {
+      logger.error('[DripListener] Error in polling loop', err instanceof Error ? err.message : String(err));
+    }
   }, intervalMs);
 }
