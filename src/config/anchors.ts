@@ -1,4 +1,6 @@
 import type { AnchorConfig } from '../types';
+import { validateStellarPublicKey } from '../utils/validation';
+import { logger } from '../utils/logger';
 
 export const ANCHORS: Record<string, AnchorConfig> = {
   NGNX: {
@@ -20,3 +22,22 @@ export const ANCHORS: Record<string, AnchorConfig> = {
     currency: 'GBP',
   },
 };
+
+export function validateAnchorConfig(): void {
+  const errors: string[] = [];
+
+  Object.entries(ANCHORS).forEach(([code, config]) => {
+    if (!config.issuer) {
+      errors.push(`${code} issuer is empty`);
+    } else if (!validateStellarPublicKey(config.issuer)) {
+      errors.push(`${code} issuer is not a valid Stellar public key`);
+    }
+  });
+
+  if (errors.length > 0) {
+    errors.forEach(e => logger.error(`Anchor config error: ${e}`));
+    throw new Error(`${errors.length} anchor configuration error(s)`);
+  }
+
+  logger.info('Anchor configs validated');
+}
