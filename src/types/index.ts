@@ -19,3 +19,8 @@ export interface AnchorConfig {
   homeDomain: string;
   currency: 'NGN' | 'USD' | 'GBP';
 }
+
+// Re-export utils for external use
+export * from '../utils/validation';
+export * from '../utils/metrics';
+export * from '../utils/logger';
