@@ -1,48 +1,122 @@
 import { Asset, Keypair } from '@stellar/stellar-sdk';
 import { startDripListener } from './services/dripListener';
 import { executePathPayment } from './services/pathPayment';
-import { ANCHORS } from './config/anchors';
-import type { RewardEvent, RoutePreferences } from './types';
+import { initSorobanClient, getSorobanClient } from './services/sorobanClient';
+import { initiateSEP24Deposit } from './services/sep24Deposit';
+import { transactionHistory } from './services/transactionHistory';
+import { listenerRateLimiter } from './services/rateLimiter';
+import { ANCHORS, validateAnchorConfig } from './config/anchors';
+import { validateEnvironment } from './config/env';
+import type { RewardEvent } from './types';
+import { logger, LogLevel } from './utils/logger';
+import { metricsCollector } from './utils/metrics';
+import { validatePercentageSplit } from './utils/validation';
 
-// TODO: Replace with Soroban contract read via soroban-client
-const MOCK_PREFS: Pick<RoutePreferences, 'off_ramp_pct' | 'keep_crypto_pct' | 'anchor_asset_code'> = {
-  off_ramp_pct: 70,
-  keep_crypto_pct: 30,
-  anchor_asset_code: 'NGNX',
-};
+let config = validateEnvironment();
+validateAnchorConfig();
 
-if (MOCK_PREFS.off_ramp_pct + MOCK_PREFS.keep_crypto_pct !== 100) {
-  throw new Error(`MOCK_PREFS allocations must sum to 100, got ${MOCK_PREFS.off_ramp_pct + MOCK_PREFS.keep_crypto_pct}`);
+if (process.env.DEBUG) {
+  logger.setLevel(LogLevel.DEBUG);
 }
+
+const devKeypair = Keypair.fromSecret(config.dev_private_key);
+initSorobanClient(config.soroban_rpc_url, config.reward_router_contract_id, devKeypair);
 
 async function handleReward(event: RewardEvent): Promise<void> {
-  console.log(`[AutoFi] Reward received: ${event.amount} ${event.assetCode} from ${event.sourceId}`);
+  const startTime = Date.now();
 
-  const anchor = ANCHORS[MOCK_PREFS.anchor_asset_code];
-  if (!anchor) throw new Error(`Unknown anchor: ${MOCK_PREFS.anchor_asset_code}`);
+  try {
+    logger.info(`[AutoFi] Reward received: ${event.amount} ${event.assetCode} from ${event.sourceId}`);
 
-  const offRampAmount = (
-    (parseFloat(event.amount) * MOCK_PREFS.off_ramp_pct) / 100
-  ).toFixed(7);
+    // Rate limiting
+    await listenerRateLimiter.waitIfNeeded('handleReward');
 
-  const devKeypair = Keypair.fromSecret(process.env.DEV_PRIVATE_KEY!);
-  const sendAsset = new Asset(event.assetCode, event.assetIssuer);
-  const destAsset = new Asset(anchor.code, anchor.issuer);
+    // Get preferences from Soroban contract
+    const sorobanClient = getSorobanClient();
+    const prefs = await sorobanClient.getPreferences(event.developerPublicKey);
 
-  console.log(`[AutoFi] Off-ramping ${offRampAmount} ${event.assetCode} → ${anchor.code} (${anchor.currency})`);
+    // Validate preferences
+    if (!validatePercentageSplit(prefs.off_ramp_pct, prefs.keep_crypto_pct)) {
+      throw new Error(`Invalid preference split: ${prefs.off_ramp_pct}% + ${prefs.keep_crypto_pct}% != 100%`);
+    }
 
-  const txHash = await executePathPayment({
-    developerKeypair: devKeypair,
-    sendAmount: offRampAmount,
-    sendAsset,
-    destAsset,
-  });
+    const anchor = ANCHORS[prefs.anchor_asset_code];
+    if (!anchor) {
+      throw new Error(`Unknown anchor: ${prefs.anchor_asset_code}`);
+    }
 
-  console.log(`[AutoFi] ✅ Swap complete. tx: ${txHash}`);
-  // TODO: Trigger SEP-24 interactive deposit to push anchor funds to bank
+    const offRampAmount = (
+      (parseFloat(event.amount) * prefs.off_ramp_pct) / 100
+    ).toFixed(7);
+
+    logger.info(`[AutoFi] Off-ramping ${offRampAmount} ${event.assetCode} → ${anchor.code} (${anchor.currency})`);
+
+    const sendAsset = new Asset(event.assetCode, event.assetIssuer);
+    const destAsset = new Asset(anchor.code, anchor.issuer);
+
+    const txHash = await executePathPayment({
+      developerKeypair: devKeypair,
+      sendAmount: offRampAmount,
+      sendAsset,
+      destAsset,
+      slippagePercent: 2,
+    });
+
+    logger.info(`[AutoFi] ✅ Swap complete. tx: ${txHash}`);
+
+    // Record transaction
+    transactionHistory.add({
+      txHash,
+      developerPublicKey: event.developerPublicKey,
+      sendAmount: offRampAmount,
+      sendAsset: event.assetCode,
+      destAsset: anchor.code,
+      status: 'success',
+    });
+
+    // Trigger SEP-24 interactive deposit
+    try {
+      const depositResult = await initiateSEP24Deposit({
+        anchorConfig: anchor,
+        amount: offRampAmount,
+        userPublicKey: event.developerPublicKey,
+      });
+      logger.info(`[AutoFi] SEP-24 deposit initiated: ${depositResult.url}`);
+    } catch (err) {
+      logger.warn('SEP-24 deposit initiation failed', err instanceof Error ? err.message : String(err));
+    }
+
+    const processingTime = Date.now() - startTime;
+    metricsCollector.recordSuccess(offRampAmount, processingTime);
+    logger.debug(`Processed in ${processingTime}ms`);
+
+  } catch (err) {
+    logger.error('[AutoFi] Error processing reward', err instanceof Error ? err : String(err));
+    metricsCollector.recordFailure();
+
+    transactionHistory.add({
+      txHash: 'failed',
+      developerPublicKey: event.developerPublicKey,
+      sendAmount: event.amount,
+      sendAsset: event.assetCode,
+      destAsset: 'unknown',
+      status: 'failed',
+    });
+
+    // Implement exponential backoff for retries via the main listener
+  }
 }
 
-const recipientKey = process.env.DEV_PUBLIC_KEY;
-if (!recipientKey) throw new Error('DEV_PUBLIC_KEY not set');
-
+// Start listener
+const recipientKey = config.dev_public_key;
+logger.info(`Starting AutoFi listener for ${recipientKey}`);
 startDripListener(recipientKey, handleReward);
+
+// Graceful shutdown
+process.on('SIGINT', () => {
+  logger.info('Shutting down gracefully...');
+  const metrics = metricsCollector.getMetrics();
+  logger.info(`Final metrics: ${JSON.stringify(metrics)}`);
+  process.exit(0);
+});
+
